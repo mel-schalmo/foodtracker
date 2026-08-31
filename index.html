@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Macro Ledger — pipeline test</title>
+<title>Macro Ledger — food search</title>
 <style>
   body {
     font-family: system-ui, sans-serif;
@@ -15,62 +15,96 @@
     background: #F2F1E6;
   }
   h1 { font-size: 1.4rem; }
-  button {
-    background: #2E5C8A;
-    color: #fff;
-    border: none;
+  p { color: #3a3f47; }
+  a { color: #2E5C8A; }
+  input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 0.95rem;
+    border: 1px solid #CBC7B2;
     border-radius: 7px;
-    padding: 10px 18px;
-    font-size: 0.9rem;
-    cursor: pointer;
+    background: #FBFAF3;
+    color: #20242B;
+    box-sizing: border-box;
   }
-  button:hover { background: #1F3F5E; }
-  pre {
+  .results { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .result {
     background: #FBFAF3;
     border: 1px solid #CBC7B2;
     border-radius: 8px;
-    padding: 14px;
-    margin-top: 16px;
-    white-space: pre-wrap;
-    word-break: break-word;
+    padding: 10px 12px;
   }
-  .status { font-size: 0.85rem; color: #6B6A5C; margin-top: 8px; }
+  .result .name { font-weight: 600; }
+  .result .brand { font-size: 0.78rem; color: #6B6A5C; }
+  .result .macros { font-size: 0.8rem; color: #6B6A5C; margin-top: 4px; font-family: ui-monospace, monospace; }
+  .status { font-size: 0.85rem; color: #6B6A5C; margin-top: 8px; min-height: 1.2em; }
 </style>
 </head>
 <body>
-  <h1>Macro Ledger — step 1: pipeline test</h1>
-  <p>This page doesn't do anything real yet. It just checks that three things
-     are wired together correctly: this static page, deployed by Netlify from
-     your GitHub repo, and a small serverless function (also deployed by
-     Netlify) that the page can call.</p>
+  <h1>Macro Ledger — step 2: real food search</h1>
+  <p>Search pulls live from
+     <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>,
+     a free, open database of real branded/packaged products — not the fixed
+     list from the earlier prototype.</p>
 
-  <button id="testBtn">Test connection to backend</button>
+  <input type="text" id="searchInput" placeholder="Try a brand name, e.g. Hidden Valley Ranch">
   <div class="status" id="status"></div>
-  <pre id="output" hidden></pre>
+  <div class="results" id="results"></div>
 
   <script>
-    var btn = document.getElementById('testBtn');
+    var input = document.getElementById('searchInput');
     var statusEl = document.getElementById('status');
-    var output = document.getElementById('output');
+    var results = document.getElementById('results');
+    var debounceTimer = null;
+    var latestQuery = '';
 
-    btn.addEventListener('click', function () {
-      statusEl.textContent = 'Calling /.netlify/functions/hello ...';
-      output.hidden = true;
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
 
-      fetch('/.netlify/functions/hello')
-        .then(function (res) {
-          if (!res.ok) throw new Error('Server responded with status ' + res.status);
-          return res.json();
-        })
-        .then(function (data) {
-          statusEl.textContent = 'Success — the frontend and backend are talking to each other.';
-          output.textContent = JSON.stringify(data, null, 2);
-          output.hidden = false;
+    function runSearch(q) {
+      latestQuery = q;
+      if (!q.trim()) { results.innerHTML = ''; statusEl.textContent = ''; return; }
+      statusEl.textContent = 'Searching Open Food Facts…';
+      results.innerHTML = '';
+
+      fetch('/.netlify/functions/search-food?q=' + encodeURIComponent(q))
+        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+        .then(function (wrapped) {
+          if (q !== latestQuery) return;
+          if (!wrapped.ok || wrapped.data.error) {
+            throw new Error(wrapped.data.error || 'request failed');
+          }
+          var data = wrapped.data;
+          if (!data.results.length) {
+            statusEl.textContent = 'No results for "' + q + '".';
+            return;
+          }
+          statusEl.textContent = data.results.length + ' result(s):';
+          results.innerHTML = data.results.map(function (r) {
+            return '<div class="result">'
+              + '<div class="name">' + esc(r.name) + '</div>'
+              + (r.brand ? '<div class="brand">' + esc(r.brand) + '</div>' : '')
+              + '<div class="macros">' + esc(r.servingLabel) + ' &middot; '
+              + Math.round(r.calories) + ' cal, '
+              + (r.protein != null ? Math.round(r.protein) : '?') + 'g P, '
+              + (r.carbs != null ? Math.round(r.carbs) : '?') + 'g C, '
+              + (r.fat != null ? Math.round(r.fat) : '?') + 'g F</div>'
+              + '</div>';
+          }).join('');
         })
         .catch(function (err) {
-          statusEl.textContent = 'Something went wrong: ' + err.message +
-            ' (this usually means the function hasn\'t deployed yet, or the site is still building).';
+          if (q !== latestQuery) return;
+          statusEl.textContent = 'Something went wrong: ' + err.message;
         });
+    }
+
+    input.addEventListener('input', function () {
+      clearTimeout(debounceTimer);
+      var q = input.value;
+      debounceTimer = setTimeout(function () { runSearch(q); }, 400);
     });
   </script>
 </body>
