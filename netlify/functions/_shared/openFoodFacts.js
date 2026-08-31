@@ -70,7 +70,8 @@ function extractNutrition(product) {
       calories: n["energy-kcal_serving"],
       protein: n["proteins_serving"],
       carbs: n["carbohydrates_serving"],
-      fat: n["fat_serving"]
+      fat: n["fat_serving"],
+      basis: "serving" // already a real per-serving figure, nothing to convert
     };
   }
 
@@ -87,10 +88,17 @@ function extractNutrition(product) {
       calories: per100Calories * factor,
       protein: scale(n["proteins_100g"], factor),
       carbs: scale(n["carbohydrates_100g"], factor),
-      fat: scale(n["fat_100g"], factor)
+      fat: scale(n["fat_100g"], factor),
+      basis: "serving" // we converted it ourselves, from a serving size OFF gave us
     };
   }
 
+  // OFF has no serving size at all for this product (not just missing
+  // per-serving nutrients — the product itself was never given a serving
+  // size by whoever entered it). These figures are genuinely per 100g,
+  // with nothing to convert from — flagged with basis:"100g" so the
+  // frontend can offer a "enter your product's real serving size" input
+  // instead of silently showing a number that looks like it's per-serving.
   return {
     name: name,
     brand: brand,
@@ -98,7 +106,8 @@ function extractNutrition(product) {
     calories: per100Calories,
     protein: n["proteins_100g"],
     carbs: n["carbohydrates_100g"],
-    fat: n["fat_100g"]
+    fat: n["fat_100g"],
+    basis: "100g"
   };
 }
 
