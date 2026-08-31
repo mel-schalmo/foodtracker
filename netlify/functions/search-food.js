@@ -7,10 +7,32 @@
 // 2) It's the right place to eventually add caching or an API key without
 //    exposing any of that to whoever opens the page.
 //
-// NOTE: written against Open Food Facts' documented API shape — I couldn't
-// test it against a live response before you deployed it (my own dev
-// environment is also network-restricted). So your first real search here
-// is also the test of whether the field names below are right.
+// Open Food Facts is a free, community-run service — it doesn't promise
+// uptime, and it occasionally responds with a "temporarily unavailable"
+// status under load. RETRY_STATUSES lists the response codes worth trying
+// again for; anything else (like a 400 for a bad request) fails immediately
+// since retrying wouldn't change the outcome.
+const RETRY_STATUSES = [502, 503, 504];
+const MAX_ATTEMPTS = 3;
+
+function sleep(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+// Calls fetch, and if the response comes back with one of the "try again"
+// statuses above, waits a moment and retries — up to MAX_ATTEMPTS total —
+// before giving up and returning whatever the last response was.
+async function fetchWithRetry(url, options) {
+  let response;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    response = await fetch(url, options);
+    if (response.ok || !RETRY_STATUSES.includes(response.status) || attempt === MAX_ATTEMPTS) {
+      return response;
+    }
+    await sleep(300 * attempt); // wait a bit longer on each retry
+  }
+  return response;
+}
 
 exports.handler = async function (event, context) {
   const query = ((event.queryStringParameters && event.queryStringParameters.q) || "").trim();
@@ -29,8 +51,9 @@ exports.handler = async function (event, context) {
     + "&fields=product_name,brands,serving_size,nutriments";
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       headers: {
+        // Open Food Facts asks API users to identify their app in requests.
         "User-Agent": "MacroLedgerLearningProject/1.0 (personal project)"
       }
     });
@@ -39,7 +62,7 @@ exports.handler = async function (event, context) {
       return {
         statusCode: 502,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "Open Food Facts responded with status " + response.status })
+        body: JSON.stringify({ error: "Open Food Facts responded with status " + response.status + " (tried " + MAX_ATTEMPTS + " times)" })
       };
     }
 
@@ -66,6 +89,8 @@ exports.handler = async function (event, context) {
         fat: fat
       };
     }).filter(function (r) {
+      // Skip anything without a name or a usable calorie number — OFF's data
+      // is user-submitted, so a lot of entries are incomplete.
       return !!r.name && typeof r.calories === "number";
     });
 
