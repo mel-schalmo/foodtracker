@@ -43,6 +43,18 @@
   .result .name { font-weight: 600; }
   .result .brand { font-size: 0.78rem; color: #6B6A5C; }
   .result .macros { font-size: 0.8rem; color: #6B6A5C; margin-top: 4px; font-family: ui-monospace, monospace; }
+  .convert-row { margin-top: 6px; font-size: 0.78rem; color: #6B6A5C; }
+  .convert-row input[type="number"] {
+    width: 70px;
+    padding: 4px 6px;
+    font-size: 0.8rem;
+    border: 1px solid #CBC7B2;
+    border-radius: 5px;
+    background: #FBFAF3;
+    color: #20242B;
+    margin: 0 4px;
+  }
+  .convert-note { margin-top: 4px; font-family: ui-monospace, monospace; color: #2E5C8A; font-weight: 600; min-height: 1.1em; }
   .status { font-size: 0.85rem; color: #6B6A5C; margin-top: 8px; min-height: 1.2em; }
   video#scanVideo {
     width: 100%;
@@ -108,15 +120,66 @@
     // Shared by both search results and a scanned/looked-up barcode result,
     // so a single product looks the same everywhere it shows up.
     function resultCardHtml(r) {
-      return '<div class="result">'
-        + '<div class="name">' + esc(r.name) + '</div>'
-        + (r.brand ? '<div class="brand">' + esc(r.brand) + '</div>' : '')
-        + '<div class="macros">' + esc(r.servingLabel) + ' &middot; '
+      var macros = '<div class="macros">' + esc(r.servingLabel) + ' &middot; '
         + Math.round(r.calories) + ' cal, '
         + (r.protein != null ? Math.round(r.protein) : '?') + 'g P, '
         + (r.carbs != null ? Math.round(r.carbs) : '?') + 'g C, '
-        + (r.fat != null ? Math.round(r.fat) : '?') + 'g F</div>'
+        + (r.fat != null ? Math.round(r.fat) : '?') + 'g F</div>';
+
+      // basis:"100g" means Open Food Facts has no real serving size on file
+      // for this product at all — these numbers are genuinely per 100g,
+      // not an estimate of a serving. Rather than let that look like a
+      // per-serving figure, offer to convert it using the real serving
+      // size printed on the package (no manual database entry required —
+      // just the one number, per lookup, when it's needed).
+      var convertRow = '';
+      if (r.basis === '100g') {
+        convertRow = '<div class="convert-row"'
+          + ' data-cal100="' + r.calories + '"'
+          + ' data-protein100="' + (r.protein == null ? '' : r.protein) + '"'
+          + ' data-carbs100="' + (r.carbs == null ? '' : r.carbs) + '"'
+          + ' data-fat100="' + (r.fat == null ? '' : r.fat) + '">'
+          + 'These are per 100&nbsp;g — Open Food Facts doesn’t have a serving size for this product. '
+          + 'Know the real one from the package? '
+          + '<input type="number" min="1" step="1" class="serving-grams-input" placeholder="e.g. 36"> g'
+          + '<div class="convert-note"></div>'
+          + '</div>';
+      }
+
+      return '<div class="result">'
+        + '<div class="name">' + esc(r.name) + '</div>'
+        + (r.brand ? '<div class="brand">' + esc(r.brand) + '</div>' : '')
+        + macros
+        + convertRow
         + '</div>';
+    }
+
+    // Wires up the "enter the real serving size" inputs inside a results
+    // container (called after its innerHTML is (re)populated, since the
+    // inputs are new DOM nodes each time).
+    function attachConvertHandlers(container) {
+      var inputs = container.querySelectorAll('.serving-grams-input');
+      for (var i = 0; i < inputs.length; i++) {
+        inputs[i].addEventListener('input', function (ev) {
+          var input = ev.target;
+          var row = input.closest('.convert-row');
+          var note = row.querySelector('.convert-note');
+          var grams = parseFloat(input.value);
+          if (!grams || grams <= 0) { note.textContent = ''; return; }
+
+          var factor = grams / 100;
+          var cal100 = parseFloat(row.getAttribute('data-cal100'));
+          var p100 = row.getAttribute('data-protein100');
+          var c100 = row.getAttribute('data-carbs100');
+          var f100 = row.getAttribute('data-fat100');
+
+          note.textContent = '≈ ' + grams + ' g serving: '
+            + Math.round(cal100 * factor) + ' cal, '
+            + (p100 === '' ? '?' : Math.round(parseFloat(p100) * factor)) + 'g P, '
+            + (c100 === '' ? '?' : Math.round(parseFloat(c100) * factor)) + 'g C, '
+            + (f100 === '' ? '?' : Math.round(parseFloat(f100) * factor)) + 'g F';
+        });
+      }
     }
 
     // ---- Search by name ----
@@ -142,6 +205,7 @@
             if (!data.results.length) { statusEl.textContent = 'No results for "' + q + '".'; return; }
             statusEl.textContent = data.results.length + ' result(s):';
             results.innerHTML = data.results.map(resultCardHtml).join('');
+            attachConvertHandlers(results);
           })
           .catch(function (err) {
             if (q !== latestQuery) return;
@@ -181,6 +245,7 @@
             }
             scanStatus.textContent = 'Found it:';
             scanResults.innerHTML = resultCardHtml(data.result);
+            attachConvertHandlers(scanResults);
           })
           .catch(function (err) {
             scanStatus.textContent = 'Something went wrong: ' + err.message;
