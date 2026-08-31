@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Macro Ledger — food search</title>
+<!-- ZXing decodes barcodes from live camera video, right in the browser —
+     no server involved for the scanning itself, only for the lookup once
+     we have the number. Pinned to an exact version on purpose: an
+     unpinned "latest" link could change under us without warning. -->
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <style>
   body {
     font-family: system-ui, sans-serif;
@@ -15,6 +20,7 @@
     background: #F2F1E6;
   }
   h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 48px; }
   p { color: #3a3f47; }
   a { color: #2E5C8A; }
   input[type="text"] {
@@ -38,74 +44,201 @@
   .result .brand { font-size: 0.78rem; color: #6B6A5C; }
   .result .macros { font-size: 0.8rem; color: #6B6A5C; margin-top: 4px; font-family: ui-monospace, monospace; }
   .status { font-size: 0.85rem; color: #6B6A5C; margin-top: 8px; min-height: 1.2em; }
+  video#scanVideo {
+    width: 100%;
+    max-height: 320px;
+    border-radius: 8px;
+    background: #000;
+    object-fit: cover;
+    margin-top: 10px;
+  }
+  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
+  button {
+    background: #2E5C8A;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    padding: 9px 16px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button:hover { background: #1F3F5E; }
+  button:disabled { background: #B9B7A6; cursor: not-allowed; }
+  details { margin-top: 16px; }
+  details summary { cursor: pointer; font-size: 0.82rem; color: #6B6A5C; }
+  details .manual-row { display: flex; gap: 8px; margin-top: 8px; }
 </style>
 </head>
 <body>
-  <h1>Macro Ledger — step 2: real food search</h1>
-  <p>Search pulls live from
+  <h1>Macro Ledger — food search &amp; barcode scan</h1>
+  <p>Both features pull live from
      <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a>,
-     a free, open database of real branded/packaged products — not the fixed
-     list from the earlier prototype.</p>
+     a free, open database of real branded/packaged products.</p>
 
+  <h2>Search by name</h2>
   <input type="text" id="searchInput" placeholder="Try a brand name, e.g. Hidden Valley Ranch">
-  <div class="status" id="status"></div>
-  <div class="results" id="results"></div>
+  <div class="status" id="searchStatus"></div>
+  <div class="results" id="searchResults"></div>
+
+  <h2>Scan a barcode</h2>
+  <p>Point your camera at the barcode on the package — it looks the product up automatically the moment it reads one.</p>
+  <div class="btn-row">
+    <button id="startScanBtn">Start scanning</button>
+    <button id="stopScanBtn" disabled>Stop</button>
+  </div>
+  <video id="scanVideo" muted playsinline></video>
+  <div class="status" id="scanStatus"></div>
+  <div class="results" id="scanResults"></div>
+
+  <details>
+    <summary>Can't get a clean scan? Enter the barcode number instead</summary>
+    <div class="manual-row">
+      <input type="text" id="manualCodeInput" inputmode="numeric" placeholder="e.g. 4006381333931">
+      <button id="manualLookupBtn">Look up</button>
+    </div>
+  </details>
 
   <script>
-    var input = document.getElementById('searchInput');
-    var statusEl = document.getElementById('status');
-    var results = document.getElementById('results');
-    var debounceTimer = null;
-    var latestQuery = '';
-
     function esc(s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
       });
     }
 
-    function runSearch(q) {
-      latestQuery = q;
-      if (!q.trim()) { results.innerHTML = ''; statusEl.textContent = ''; return; }
-      statusEl.textContent = 'Searching Open Food Facts…';
-      results.innerHTML = '';
-
-      fetch('/.netlify/functions/search-food?q=' + encodeURIComponent(q))
-        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
-        .then(function (wrapped) {
-          if (q !== latestQuery) return;
-          if (!wrapped.ok || wrapped.data.error) {
-            throw new Error(wrapped.data.error || 'request failed');
-          }
-          var data = wrapped.data;
-          if (!data.results.length) {
-            statusEl.textContent = 'No results for "' + q + '".';
-            return;
-          }
-          statusEl.textContent = data.results.length + ' result(s):';
-          results.innerHTML = data.results.map(function (r) {
-            return '<div class="result">'
-              + '<div class="name">' + esc(r.name) + '</div>'
-              + (r.brand ? '<div class="brand">' + esc(r.brand) + '</div>' : '')
-              + '<div class="macros">' + esc(r.servingLabel) + ' &middot; '
-              + Math.round(r.calories) + ' cal, '
-              + (r.protein != null ? Math.round(r.protein) : '?') + 'g P, '
-              + (r.carbs != null ? Math.round(r.carbs) : '?') + 'g C, '
-              + (r.fat != null ? Math.round(r.fat) : '?') + 'g F</div>'
-              + '</div>';
-          }).join('');
-        })
-        .catch(function (err) {
-          if (q !== latestQuery) return;
-          statusEl.textContent = 'Something went wrong: ' + err.message;
-        });
+    // Shared by both search results and a scanned/looked-up barcode result,
+    // so a single product looks the same everywhere it shows up.
+    function resultCardHtml(r) {
+      return '<div class="result">'
+        + '<div class="name">' + esc(r.name) + '</div>'
+        + (r.brand ? '<div class="brand">' + esc(r.brand) + '</div>' : '')
+        + '<div class="macros">' + esc(r.servingLabel) + ' &middot; '
+        + Math.round(r.calories) + ' cal, '
+        + (r.protein != null ? Math.round(r.protein) : '?') + 'g P, '
+        + (r.carbs != null ? Math.round(r.carbs) : '?') + 'g C, '
+        + (r.fat != null ? Math.round(r.fat) : '?') + 'g F</div>'
+        + '</div>';
     }
 
-    input.addEventListener('input', function () {
-      clearTimeout(debounceTimer);
-      var q = input.value;
-      debounceTimer = setTimeout(function () { runSearch(q); }, 400);
-    });
+    // ---- Search by name ----
+    (function () {
+      var input = document.getElementById('searchInput');
+      var statusEl = document.getElementById('searchStatus');
+      var results = document.getElementById('searchResults');
+      var debounceTimer = null;
+      var latestQuery = '';
+
+      function runSearch(q) {
+        latestQuery = q;
+        if (!q.trim()) { results.innerHTML = ''; statusEl.textContent = ''; return; }
+        statusEl.textContent = 'Searching Open Food Facts…';
+        results.innerHTML = '';
+
+        fetch('/.netlify/functions/search-food?q=' + encodeURIComponent(q))
+          .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+          .then(function (wrapped) {
+            if (q !== latestQuery) return; // a newer search has since started
+            if (!wrapped.ok || wrapped.data.error) throw new Error(wrapped.data.error || 'request failed');
+            var data = wrapped.data;
+            if (!data.results.length) { statusEl.textContent = 'No results for "' + q + '".'; return; }
+            statusEl.textContent = data.results.length + ' result(s):';
+            results.innerHTML = data.results.map(resultCardHtml).join('');
+          })
+          .catch(function (err) {
+            if (q !== latestQuery) return;
+            statusEl.textContent = 'Something went wrong: ' + err.message;
+          });
+      }
+
+      input.addEventListener('input', function () {
+        clearTimeout(debounceTimer);
+        var q = input.value;
+        debounceTimer = setTimeout(function () { runSearch(q); }, 400);
+      });
+    })();
+
+    // ---- Barcode scan ----
+    (function () {
+      var startBtn = document.getElementById('startScanBtn');
+      var stopBtn = document.getElementById('stopScanBtn');
+      var scanStatus = document.getElementById('scanStatus');
+      var scanResults = document.getElementById('scanResults');
+      var manualInput = document.getElementById('manualCodeInput');
+      var manualBtn = document.getElementById('manualLookupBtn');
+      var codeReader = null;
+
+      function lookupBarcode(code) {
+        scanStatus.textContent = 'Looking up ' + code + '…';
+        scanResults.innerHTML = '';
+
+        fetch('/.netlify/functions/barcode-lookup?code=' + encodeURIComponent(code))
+          .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+          .then(function (wrapped) {
+            if (!wrapped.ok || wrapped.data.error) throw new Error(wrapped.data.error || 'lookup failed');
+            var data = wrapped.data;
+            if (!data.found) {
+              scanStatus.textContent = 'No product found for barcode ' + code + ' in Open Food Facts.';
+              return;
+            }
+            scanStatus.textContent = 'Found it:';
+            scanResults.innerHTML = resultCardHtml(data.result);
+          })
+          .catch(function (err) {
+            scanStatus.textContent = 'Something went wrong: ' + err.message;
+          });
+      }
+
+      function stopScanning(message) {
+        if (codeReader) { codeReader.reset(); }
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        if (message) scanStatus.textContent = message;
+      }
+
+      function startScanning() {
+        if (typeof ZXing === 'undefined') {
+          scanStatus.textContent = 'The barcode scanning library failed to load — check your connection and reload the page.';
+          return;
+        }
+        codeReader = new ZXing.BrowserMultiFormatReader();
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        scanResults.innerHTML = '';
+        scanStatus.textContent = 'Requesting camera access…';
+
+        codeReader.decodeFromConstraints(
+          { video: { facingMode: 'environment' } },
+          'scanVideo',
+          function (result, err) {
+            if (result) {
+              var code = result.getText();
+              stopScanning('Scanned: ' + code);
+              lookupBarcode(code);
+            } else if (err && !(err instanceof ZXing.NotFoundException)) {
+              // NotFoundException fires on basically every frame that
+              // doesn't contain a readable barcode yet — completely
+              // normal while you're aiming the camera. Anything else is
+              // a real problem worth showing.
+              stopScanning('Scanning error: ' + err.message);
+            } else if (scanStatus.textContent === 'Requesting camera access…') {
+              scanStatus.textContent = 'Scanning — point the camera at a barcode.';
+            }
+          }
+        ).catch(function (err) {
+          stopScanning('Could not access the camera: ' + err.message);
+        });
+      }
+
+      startBtn.addEventListener('click', startScanning);
+      stopBtn.addEventListener('click', function () { stopScanning('Stopped.'); });
+
+      manualBtn.addEventListener('click', function () {
+        var code = manualInput.value.trim();
+        if (code) lookupBarcode(code);
+      });
+      manualInput.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') manualBtn.click();
+      });
+    })();
   </script>
 </body>
 </html>
