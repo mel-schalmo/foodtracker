@@ -1,0 +1,8 @@
+# Tells Netlify where to find things in this project.
+# publish   = the folder Netlify serves as the actual website (root, since
+#             index.html lives right here)
+# functions = the folder Netlify scans for serverless functions to deploy
+
+[build]
+  publish = "."
+  functions = "netlify/functions"
